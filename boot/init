@@ -7,7 +7,10 @@
 export PATH=/bin:/sbin HOME=/root TERM=vt100
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
-echo 7 > /proc/sys/kernel/printk
+# 4, not 7: every KERN_INFO line went to the 115200 baud UART synchronously until OpenWrt's sysctl lowered it at ~14 s
+# (33 KB, ~2.9 s of the boot: the module loads below and procd's first second waited on the console). The stage
+# lines are KERN_ERR, so they still reach the UART and console-ramoops; everything stays in dmesg.
+echo 4 > /proc/sys/kernel/printk
 # the custom kernel has devtmpfs; fall back to tmpfs + mknod for safety
 if ! mount -t devtmpfs -o mode=0755 devtmpfs /dev; then
     mount -t tmpfs -o mode=0755 tmpfs /dev
@@ -380,7 +383,7 @@ setup_usb_gadget() {  # setup_usb_gadget [FUNCTIONS]: FUNCTIONS, else MU300_USBN
     [ -z "$udc" ] && for u in /sys/class/udc/*; do [ -e "$u" ] && { udc=$(basename "$u"); break; }; done
     log "stage=udc udc=${udc:-none} available=$(ls /sys/class/udc 2>/dev/null | tr '\n' ',')"
     persist
-    sleep 1
+    # (no pause here any more: a "sleep 1" from the first bring-up held every boot back a second, with the UDC there)
     # Never rebind the gadget from a shell running on its own ACM console: the console dies with the unbind and the
     # rebind never runs, which leaves the device with no USB at all until it is power-cycled.
     log "stage=usb-bind-start"
