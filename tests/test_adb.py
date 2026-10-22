@@ -269,8 +269,9 @@ class Gadget(ShellTest):
             self.assertFalse(self.linked())
             self.assertEqual(self.UDC, self.read('UDC'))
             self.assertEqual('0x0301', self.read('bcdDevice'))
-            self.assertEqual('0', self.read('os_desc/use'))
-            self.assertFalse(os.path.lexists(self.g / 'os_desc/c.1'))
+            # left on: a bind without them would leave f_ncm's freed os_desc_table for the next unbind to free again
+            self.assertEqual('1', self.read('os_desc/use'))
+            self.assertTrue(os.path.islink(self.g / 'os_desc/c.1'))
             self.assertFalse((self.g / 'functions/ffs.adb').exists())
             self.assertIn(f'umount {self.ffs}', self.calls())
             # nothing was ever set on this device: on, and open to every computer

@@ -120,12 +120,13 @@ with_adb() {
     fi
     return 0
 }
+# The MS OS descriptors stay on once with_adb has turned them on: f_ncm/f_rndis keep a stale os_desc_table after
+# an unbind, a bind without them leaves it so and the next unbind frees it twice (kmalloc-16 corrupted, oops of
+# 2026-10-22; kernel patch 0025). NCM's compatible_id is empty, so the computer sees no other function for it.
 without_adb() {
     rm -f "$L"
     if rndis; then echo 0x0302 > "$G/bcdDevice"; else
         echo 0x0301 > "$G/bcdDevice"
-        rm -f "$G/os_desc/c.1"
-        [ -e "$G/os_desc/use" ] && echo 0 > "$G/os_desc/use"
     fi
     return 0
 }
