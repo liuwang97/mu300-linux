@@ -934,6 +934,24 @@ if [ "$root_mounted" = 1 ] && rootdir=$(pick_root) && [ -n "$rootdir" ]; then
     echo "$DEVICE" > /run/mu300/device
     init=/sbin/init
     [ -x /newroot/lib/systemd/systemd ] && init=/lib/systemd/systemd
+    # OpenWrt: procd's first act is "kmodloader /etc/modules-boot.d/", and kmodloader begins by reading every module
+    # in /lib/modules/<release> (~2950 files, a few scattered blocks of each, cold off the eMMC: 1.7 s with procd
+    # waiting; parallel reads or the loop device's direct I/O won back 0.2 s at most). What that list loads is all in
+    # /etc/modules.d as well, which /etc/init.d/boot loads two seconds later (by then from the cache the prefetch
+    # above filled). So only that one call is skipped: a stub bind-mounted over /sbin/kmodloader takes itself away at
+    # its first run, whatever that is (lazily: the shell running it holds it open), and hands every call but
+    # procd's to the real kmodloader by its own name (modprobe, insmod, lsmod are links to it).
+    if [ "$init" = /sbin/init ] && [ -x /newroot/sbin/kmodloader ] && [ -d /newroot/etc/modules-boot.d ]; then
+        printf '%s\n' '#!/bin/sh' \
+            '# MU300 initramfs (boot/init): stands in for kmodloader until its first run, procd'"'"'s modules-boot.d' \
+            'umount -l /sbin/kmodloader 2>/dev/null' \
+            '[ "${0##*/} $1" = "kmodloader /etc/modules-boot.d/" ] && exit 0' \
+            '[ -z "$MU300_KMOD_ONCE" ] || exit 1' \
+            'export MU300_KMOD_ONCE=1' \
+            'exec "$0" "$@"' > /run/.kmodloader-once
+        chmod 755 /run/.kmodloader-once
+        mount --bind /run/.kmodloader-once /newroot/sbin/kmodloader && log "stage=kmodloader-once"
+    fi
     log "stage=switch-root root=$rootdir init=$init os=$(sed -n 's/^PRETTY_NAME=//p' /newroot/etc/os-release)"
     persist
     kill $(jobs -p | grep -vx "$prefetch") 2>/dev/null
