@@ -12456,8 +12456,10 @@ What took the time, and what was done:
   start's commands take ~0.15 s each instead of three of them taking 1 s more. `sipa-dele-start` slept 3 s after the
   insmod to look for the channel-open line, which is there in the same millisecond (now looked for every 0.1 s), and
   asked for the attach every 2 s (now 0.5 s). `mobile-data`, `mu300-sim2-start` and `mu300-sim2-warmup` polled every
-  second on the dial's path (now 0.2 to 0.3 s). `mu300-atd` also reads `/proc/uptime` instead of forking `date +%s`
-  several times per command (from the CPU load work, FINDINGS 205/206).
+  second on the dial's path (now 0.2 to 0.3 s). Tried and taken back: reading `/proc/uptime` in `mu300-atd` instead of
+  forking `date +%s` for its deadlines. Under bash, `read -t` keeps what it read past a line from the channel in a
+  buffer it does not tie to the file, and both reads are on fd 0, so the next read of `/proc/uptime` returned the
+  modem's reply (empty answers under bash, as on Ubuntu; busybox ash was not affected; the `Atd` tests caught it).
 * **The hotspot, ~10 s later than needed.** `mu300-hw` loaded the vendor extras (ten modprobes of modules this kernel
   does not have, and the Mali GPU's) and zram before the Wi-Fi, and after netifd's own start had brought the access point
   up, its unconditional `wifi down; wifi up` took it down again for ~4 s (and the chip with it: a power cycle and a
