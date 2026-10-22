@@ -273,12 +273,14 @@ emmc_part() {  # emmc_part NAME -> /dev/<partition>; nothing (status 1) when the
 # --- emmc end
 misc=
 find_partitions() {
-    for n in $(seq 1 20); do
+    # every 0.1 s for up to 20 s (mdev once a second): the eMMC's partitions appear ~0.2 s after the modules are in,
+    # and a whole second's pause here held every boot back that long
+    for n in $(seq 1 200); do
         misc=$(emmc_part misc)
         bootb=$(emmc_part "boot_$LINUX_SLOT")
         [ -b "$misc" ] && [ -b "$bootb" ] && break
-        sleep 1
-        mdev -s
+        usleep 100000 2>/dev/null || sleep 1
+        [ $((n % 10)) != 0 ] || mdev -s
     done
     [ -b "$misc" ] || misc=
     [ -b "$bootb" ] || bootb=
@@ -894,6 +896,15 @@ if [ "$root_mounted" = 1 ] && rootdir=$(pick_root) && [ -n "$rootdir" ]; then
         reboot -f
         sleep 30
     fi
+    # The system's modules into the page cache, beside the rest of the bring-up: OpenWrt's procd runs kmodloader before
+    # anything else, and its scan of every module (~2950 files, a few pages of each) cold off the eMMC held the boot
+    # 1.7 s. One cat of them all, from inside their directory so that it goes on after switch_root (the kill loop below
+    # spares it; its own binary and working directory stay valid), keeps ahead of the scan.
+    prefetch=
+    if [ -d "$rootdir/lib/modules/$(uname -r)" ]; then
+        (cd "$rootdir/lib/modules/$(uname -r)" && exec cat -- *.ko) >/dev/null 2>&1 </dev/null &
+        prefetch=$!
+    fi
     # the CPU voltage offset (EXPERIMENTAL): DVFS waits for this; 0,0,0 unless an offset was asked for and may run
     cpu_voltage_boot /disk/.mu300
 
@@ -925,8 +936,11 @@ if [ "$root_mounted" = 1 ] && rootdir=$(pick_root) && [ -n "$rootdir" ]; then
     [ -x /newroot/lib/systemd/systemd ] && init=/lib/systemd/systemd
     log "stage=switch-root root=$rootdir init=$init os=$(sed -n 's/^PRETTY_NAME=//p' /newroot/etc/os-release)"
     persist
-    kill $(jobs -p) 2>/dev/null
-    for p in /proc/[0-9]*; do [ "${p#/proc/}" = 1 ] || kill -9 "${p#/proc/}" 2>/dev/null; done
+    kill $(jobs -p | grep -vx "$prefetch") 2>/dev/null
+    for p in /proc/[0-9]*; do
+        p=${p#/proc/}
+        [ "$p" = 1 ] || [ "$p" = "$prefetch" ] || kill -9 "$p" 2>/dev/null
+    done
     # Trial guard, only in images built with --trial-guard SECONDS (tools/flash-trial.sh experiments, never an
     # install): the timer above ends here, and a trial kernel that boots but never brings up USB (6.18 on the U30
     # Air) left a device that only failing five boots by hand brought back. So one more timer outlives
