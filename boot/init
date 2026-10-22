@@ -22,6 +22,11 @@ if ! mount -t devtmpfs -o mode=0755 devtmpfs /dev; then
 fi
 pmsg_major=$(awk '$2=="pmsg"{print $1}' /proc/devices)
 [ -n "$pmsg_major" ] && [ ! -e /dev/pmsg0 ] && mknod /dev/pmsg0 c "$pmsg_major" 0
+# The kernel's random pool: no hardware RNG here (no SMCCC TRNG in this firmware), so it is initialised only once
+# something waits for it, by the kernel's timer-jitter loop (~0.9 s of one CPU). OpenWrt's ubusd was the first to
+# wait, and procd's init stage with it, once the boot before it had got fast. One blocking read in the background
+# here starts that loop on another CPU now; it is long done by switch_root.
+[ -c /dev/random ] && (head -c 1 /dev/random > /dev/null 2>&1) &
 
 log() {
     echo "<3>MU300-LINUX: $*" > /dev/kmsg

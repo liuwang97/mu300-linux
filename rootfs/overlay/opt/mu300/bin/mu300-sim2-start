@@ -62,6 +62,7 @@ rm -f "$REASON"
 for directory in /run/mu300-at /run/mu300-at2 /run/mu300-at4 /run/mu300-at5; do
     [[ -p "$directory/cmd" ]] || stop modem-silent "Missing broker $directory" 2
 done
+say "brokers there; waiting for CP output on nr0"
 # Wait for actual CP output, not merely a FIFO created before open_tty completes (looked for every 0.2 s: the cold
 # start is on the dial's critical path).
 for ((attempt=0; attempt<300; attempt++)); do
@@ -69,6 +70,7 @@ for ((attempt=0; attempt<300; attempt++)); do
     nap 0.2
 done
 [[ -s /run/mu300-at/urc/stty_nr0.log ]] || stop modem-silent 'No CP unsolicited output; refusing to send bring-up commands'
+say "CP output seen"
 # Verified Android SIM2-primary handshake: nr1, SMMSWAP=0. SMMSWAP=1 is not a slot selector.
 expect_ok main0 'AT+SMMSWAP=0' || stop modem-refused 'The RIL handshake was not taken'
 : > /run/mu300-ril-handshake
