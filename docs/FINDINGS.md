@@ -12671,3 +12671,36 @@ wiring, `mu300-keys -u` with real kernel uevents and a fake userspace datagram t
 `tests/test_sms_pool.py` and `tests/test_mu300cell.py` (the event waits, the fallbacks, no process while nothing
 comes, the listener gone after SIGTERM), `tests/test_power.py` (the wait follows what is close),
 `tests/test_modemd.py` (the +CMT and +CMTI events, never a PDU or a late reply).
+
+### 209. The first home page after a boot said "No response" for 30 s: the collection met lock_get on its channel
+
+Seen on the U30 Air (7.2.11, modemd on, dual-SIM boot on SIM2) two minutes after a boot: the first visit to the home
+page showed "No response", unknown signal and no serving cell for about half a minute, with 5G up and traffic
+flowing. Every later visit was fine.
+
+- **The race.** The page asks two things as it opens: `mu300status status`, which finds no cellular cache yet and
+  has modemd start a full round, and `mu300dash lock_get`, which finds no `lock.json` yet and starts
+  `unisoc-modem/lock refresh` (eight AT reads through mu300-at). With the radio freeze on SIM2 both use
+  `/run/mu300-at4` and its client lock. modemd took that lock without waiting, as the collector program's mu300-at
+  did (`MU300_AT_LOCK_WAIT=0`), and a held lock read as "no answer": every command of the round came back empty at
+  once and the round wrote `{"error": "AT backend did not answer ..."}` to sig.json and cell.json. Reproduced on the
+  device by removing `lock.json`, `cell.json` and `sig.json` and calling both: cell.json said "no answer" from 371 s to
+  403 s of uptime, sig.json only until 374 s.
+- **Why 30 s.** The next fast round (3 s later) answered, but cell.json is the full tier: 30 s before the next round.
+  The page laid sig.json's fields over cell.json with `Object.assign`, which kept cell.json's `error`, so "No
+  response" stayed although the fast tier had answered. Later visits find `lock.json` and read no locks from the modem.
+- **modemd waits.** `internal_at` says when another client holds the lock (`held`); the round asks again every 250 ms
+  until its own deadline (25 s full, 12 s fast) instead of taking it for silence. A round whose commands never reached
+  the modem because the lock was held up to the deadline writes nothing: the caches stay as they were, and the page's
+  next poll starts another round. A channel that is not served, or that is asked and stays silent, still gives the
+  "no answer" file, as before.
+- **The page.** The two tiers' merge is `mergeTiers()` in home.js: a fast tier that answered, as new as the full
+  cache, replaces a full cache that is only an error instead of being merged into it.
+
+Not changed: the collector program (`unisoc-modem/cell`, used without modemd) still does not wait for the lock. On a
+SIM1 boot its rounds have the nr6/nr7 channels to themselves; on a SIM2 boot it shares the channel with lock_get as
+modemd did.
+
+Tests: `tests/test_modemd.py` (a round waits for a client that holds the channel and then writes the real readings;
+a channel held past the deadline writes nothing), `tests/test_panel_resilience.py` (the fast tier over a "no answer"
+full cache, never an older one).

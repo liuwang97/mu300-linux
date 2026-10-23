@@ -71,6 +71,23 @@ function modulation(mcs, rat, uplink) {
 	return '--';
 }
 
+/* mergeTiers(cell, sig) -> what the page shows: the fast tier on top (sig: serving cell/registration, every 1.5 s)
+ * overrides the same fields of the slow-tier cache (cell: neighbors/operator/QoS/identity) when it is as new */
+function mergeTiers(c, s) {
+	if (!s || s.error || (c && c.ts && (s.ts || 0) < c.ts))
+		return c;
+	/* A fast tier that answered outranks the slow tier's "no answer": that error carries no readings, and merged it
+	 * kept the page on "No response" until the full cache's next round, 30 s (FINDINGS 209) */
+	if (c && c.error) c = null;
+	if (c && s.partial)
+		/* The first core reply updates the registration, but a transient empty CESQ does not wipe the last engineering signal. */
+		return Object.assign({}, c, { ts: s.ts, cfun: s.cfun, reg: s.reg, reg5g: s.reg5g });
+	return c ? Object.assign({}, c, {
+		ts: s.ts, cfun: s.cfun, reg: s.reg, reg5g: s.reg5g,
+		sig_src: s.sig_src, sig: s.sig, lte: s.lte, nr: s.nr
+	}) : s;
+}
+
 function radioMetricRows(label, rat, cell) {
 	var dlMcs = cell && cell.dl_mcs != null ? cell.dl_mcs : null;
 	var ulMcs = cell && cell.ul_mcs != null ? cell.ul_mcs : null;
@@ -571,20 +588,7 @@ return view.extend({
 			this._bootEl.classList.remove('mud-booting');
 			this._bootEl = null;
 		}
-		/* Fast tier on top: sig (serving cell/registration, every 1.5 s) overrides the same fields of the slow-tier cache c */
-		var c = st.cell || null;
-		var s = st.sig || null;
-		if (s && !s.error && (!c || !c.ts || (s.ts || 0) >= c.ts)) {
-			if (c && s.partial) {
-				/* The first core reply updates the registration, but a transient empty CESQ does not wipe the last engineering signal. */
-				c = Object.assign({}, c, {
-					ts: s.ts, cfun: s.cfun, reg: s.reg, reg5g: s.reg5g
-				});
-			} else c = c ? Object.assign({}, c, {
-				ts: s.ts, cfun: s.cfun, reg: s.reg, reg5g: s.reg5g,
-				sig_src: s.sig_src, sig: s.sig, lte: s.lte, nr: s.nr
-			}) : s;
-		}
+		var c = mergeTiers(st.cell || null, st.sig || null);
 		this.lastCell = c;
 		/* Slow-tier data (neighbors/carrier/identity) is redrawn only when the whole cache's timestamp changes */
 		var fullTs = (st.cell && st.cell.ts) || 0;

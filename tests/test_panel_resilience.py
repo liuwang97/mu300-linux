@@ -658,6 +658,28 @@ return { fresh: fresh, old: old, older: older, dead: dead };'''
         self.assertEqual(r['older'], 'Modem busy: cellular readings from 10 min ago')
         self.assertEqual(r['dead'], 'none')   # no answer at all: the hero says "No response" already
 
+    def test_a_fast_tier_that_answered_outranks_the_slow_tiers_no_answer(self):
+        # the first home page after a boot: the full round met lock_get's reading on its channel and wrote "no answer"
+        # into cell.json (30 s), and the fast round a few seconds later answered (FINDINGS 209)
+        body = '''
+V.render(); await flush();
+const rat = () => get('mud-rat').firstChild.nodeValue;
+const info = { ts: 10, host: 'mu300' }, err = { ts: 5, error: 'AT backend did not answer' };
+const sig = { ts: 8, cfun: 1, reg: { stat: 1, act: 11 }, reg5g: { stat: 1, act: 11 }, sig_src: 'nr',
+    sig: { rsrp: -83, rsrq: -6, sinr: 20 }, lte: null, nr: { band: 41, rsrp: -83, rsrq: -6, sinr: 20 } };
+V.update({ info: info, cell: err, sig: err }); const dead = rat();
+V.update({ info: info, cell: err, sig: sig }); const live = [ rat(), text('reg') ];
+V.update({ info: info, cell: err, sig: Object.assign({}, sig, { ts: 4 }) }); const older = rat();
+V.update({ info: info, cell: err, sig: Object.assign({}, sig, { partial: 1, sig_src: 'cesq', nr: null }) });
+const partial = text('reg');
+return { dead: dead, live: live, older: older, partial: partial };'''
+        r = self.run_view('home', body)['result']
+        self.assertEqual(r['dead'], 'No response')
+        self.assertEqual(r['live'][0], '5G SA')
+        self.assertTrue(r['live'][1].startswith('Registered'), r['live'])
+        self.assertEqual(r['older'], 'No response')   # an older fast reading never covers a newer slow one
+        self.assertTrue(r['partial'].startswith('Registered'), r['partial'])
+
     def test_channel_analysis_asks_before_scanning_with_an_access_point(self):
         # LuCI's page scans at once and on every poll, and a scan drops the hotspot's clients on this driver: with an
         # access point it waits for a click, without one it opens LuCI's page directly

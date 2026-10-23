@@ -631,8 +631,8 @@ on_record = function(rec) {
 };
 
 // ------------------------------------------------------------------ requests of this daemon (ubus, the collector)
-// internal_at B CMD T CB: CMD on broker B under the client lock, CB(reply, clean) - reply null when busy or the
-// channel is not served
+// internal_at B CMD T CB: CMD on broker B under the client lock, CB(reply, clean, held) - reply null when busy or the
+// channel is not served; held true when another client holds the lock (asked again later, it may be free)
 // a live SIM switch (mu300-sim-u30) holds the modem for its own commands: mu300-at's gate - the marker, believed only
 // while the switch holds its lock - keeps every other client off, and this daemon's own requests too
 function sim_sequence() {
@@ -655,7 +655,7 @@ function internal_at(b, cmd, t, cb) {
 	}
 	let lock = lock_take(b, t + 31);
 	if (!lock) {
-		cb(null, false);
+		cb(null, false, true);
 		return;
 	}
 	enqueue(b, { kind: 'internal', t: t, cmd: cmd, cb: (text, clean) => { lock_drop(lock); cb(text, clean); } });
@@ -735,24 +735,46 @@ function run_steps(steps, ctx, done) {
 }
 
 function round_end(R) {
+	if (R.wait)
+		R.wait.cancel();
 	for (let p in R.held)
 		rm_rf(p);
 	round = null;
 }
 
 // at on the round's channels: the assigned one first, then the fallbacks (a silent one fails in about T + 1 s);
-// '' for no answer, as the collector's at()
+// '' for no answer, as the collector's at(). A channel whose client lock another client holds is busy, not silent:
+// when every channel left was busy, they are asked again every 250 ms until the round's deadline (the home page's
+// first lock_get after a boot reads the locks on the same channel, at the same moment as the first round; not
+// waiting wrote "no answer" into cell.json for its whole 30 s, FINDINGS 209). R.asked: a command reached the modem;
+// R.held_out: one gave up at the deadline with the lock still held.
 function round_at(R, cmd, t, cb) {
-	let i = 0;
+	// busy: a channel of this pass was held; waiting: a pass after a busy one, nothing but busy channels seen since
+	let i = 0, busy = false, waiting = false;
 	let tryit;
 	tryit = () => {
 		while (i < length(R.cands) && !R.cands[i].served) i++;
-		if (i >= length(R.cands)) { cb(''); return; }
+		if (i >= length(R.cands)) {
+			if (busy && R.deadline - time() >= 1) {
+				i = 0;
+				busy = false;
+				waiting = true;
+				R.wait = retimer(R.wait, 250, tryit);
+				return;
+			}
+			if (busy)
+				R.held_out = true;
+			cb('');
+			return;
+		}
 		let left = R.deadline - time();
-		if (left < 1) { cb(''); return; }
+		if (left < 1) { if (busy || waiting) R.held_out = true; cb(''); return; }
 		if (left > t + 4) left = t + 4;
 		let b = R.cands[i++];
-		internal_at(b, cmd, t, (text, clean) => {
+		internal_at(b, cmd, t, (text, clean, held) => {
+			if (held) { busy = true; tryit(); return; }
+			waiting = false;
+			if (text != null) R.asked = true;
 			if (text == null || !match(text, cp.FINAL)) { tryit(); return; }
 			cb(replace(text, /\r/g, ''));
 		});
@@ -947,6 +969,12 @@ function run_round(R) {
 	let write_out = (x) => {
 		// "no answer at all" is a modem/daemon problem, not "no signal"
 		if ((x.CFUN ?? '') + (x.CEREG ?? '') + (x.CESQ ?? '') + x.SP_LTE + x.SP_NR + x.COPS == '') {
+			// ... unless the modem was never asked: another client held the channel the whole round. The caches stay as
+			// they were, and the page's next poll starts another round.
+			if (R.held_out && !R.asked) {
+				log('collection round: another client held the AT channel until the deadline; nothing written');
+				return;
+			}
 			let err = jstr({ ts: time(), error: 'AT backend did not answer (radio off, modem restarting, or adapter unavailable)' }) + '\n';
 			publish(SIGF, err);
 			if (full)

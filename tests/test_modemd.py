@@ -542,6 +542,52 @@ class ModemdUbus(Base):
         self.assertEqual(cmds, ['AT+CFUN?;+CEREG?;+C5GREG?;+CESQ\r', 'AT+SPENGMD=0,14,1\r'])
         self.assertEqual(json.loads(sig.read_text())['sig_src'], 'nr')
 
+    def hold_the_channel(self):
+        """Another client's lock on the round's channel (mu300-at's: a live pid, its deadline ahead)."""
+        holder = subprocess.Popen(['sleep', '60'])
+        self.procs.append(holder)
+        lock = self.at_dir() / 'lock'
+        lock.mkdir()
+        (lock / 'pid').write_text(f'{holder.pid}\n')
+        (lock / 'until').write_text(f'{int(time.time()) + 120}\n')
+        return lock
+
+    def test_the_collection_waits_for_a_client_that_holds_the_channel(self):
+        # the home page's first lock_get after a boot reads the locks on this channel as the first round starts: busy
+        # is not "no answer" (FINDINGS 209)
+        self.start()
+        self.ready()
+        self.wait_object()
+        lock = self.hold_the_channel()
+        self.bridge.tx.clear()
+        self.assertEqual(self.ubus('call', 'mu300.modem', 'cell', json.dumps({'mode': 'full'})), {'started': 1})
+        dash = self.tmp / 'dash'
+        time.sleep(1.5)
+        self.assertFalse((dash / 'cell.json').exists())
+        self.assertFalse((dash / 'sig.json').exists(), (dash / 'sig.json').exists() and (dash / 'sig.json').read_text())
+        self.assertEqual(self.bridge.tx, [])
+        shutil.rmtree(lock)
+        self.assertTrue(wait_for(lambda: (dash / 'cell.json').exists() and not (dash / 'collect.lck').exists(), 15))
+        cell = json.loads((dash / 'cell.json').read_text())
+        self.assertNotIn('error', cell)
+        self.assertEqual(cell['reg']['stat'], 1)
+        self.assertNotIn('error', json.loads((dash / 'sig.json').read_text()))
+
+    def test_a_channel_held_past_the_deadline_writes_no_answer_file(self):
+        # the modem never asked: the caches stay as they were (none here) rather than say it did not answer
+        self.start()
+        self.ready()
+        self.wait_object()
+        self.hold_the_channel()
+        self.bridge.tx.clear()
+        self.assertEqual(self.ubus('call', 'mu300.modem', 'cell', json.dumps({'mode': 'fast'})), {'started': 1})
+        dash = self.tmp / 'dash'
+        self.assertTrue(wait_for(lambda: (dash / 'collect.lck').exists(), 2))
+        # the fast round's deadline is 12 s
+        self.assertTrue(wait_for(lambda: not (dash / 'collect.lck').exists(), 16))
+        self.assertFalse((dash / 'sig.json').exists(), (dash / 'sig.json').exists() and (dash / 'sig.json').read_text())
+        self.assertEqual(self.bridge.tx, [])
+
 
 if __name__ == '__main__':
     unittest.main()
