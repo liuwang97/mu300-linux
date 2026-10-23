@@ -13129,3 +13129,52 @@ wiring, `mu300-keys -u` with real kernel uevents and a fake userspace datagram t
 `tests/test_sms_pool.py` and `tests/test_mu300cell.py` (the event waits, the fallbacks, no process while nothing
 comes, the listener gone after SIGTERM), `tests/test_power.py` (the wait follows what is close),
 `tests/test_modemd.py` (the +CMT and +CMTI events, never a PDU or a late reply).
+
+### 218. CPU0's cluster power-down: USB, IPA and the Wi-Fi's PCIe were not wake sources (ums9620_lpintc)
+
+**Status: built for 6.18.57 and measured on a U30 Air (OpenWrt 25.12.5, 6.18.57); not yet built for 7.2 and 7.3, its
+suspend path not yet run on a device, the power with it not measured.**
+
+With every cpuidle state allowed, pings over USB from a computer waited up to 120 ms. The waits went away with CPU0
+kept out of its deepest state, `cluster-pd` (PSCI; the A55 cluster and its DSU powered off), and that was the
+device-local workaround (`/etc/rc.local` writing `cpu0/cpuidle/state2/disable`). The reason is in TF-A. A powered-down
+cluster is woken not by the GIC but by the always-on LP_AP_INTC: eight blocks of 32 lines, line b of INTCn being GIC
+SPI 32n + b, each line a wake source only where its bit in that block's IRQ_EN is set. TF-A (sml) sets those once at
+boot from its own table (`sml_a.img` + 0x114d8, pairs of register and value): INTC0 0xf5085c00, INTC1 0x2080b9fc,
+INTC7 0x40, INTC2-6 nothing. The USB controller (dwc3, SPI 142: INTC4 bit 14), the IPA (SPI 136-138) and the Wi-Fi
+chip's PCIe MSI are in INTC2-6, so while CPU0's cluster was powered down their interrupts waited for something else
+(the system timer, INTC1) to wake it.
+
+| block | base | TF-A's IRQ_EN | added on a running U30 Air |
+|---|---|---|---|
+| INTC0-5 | 0x640c0000 + n * 0x10000 | 0xf5085c00, 0x2080b9fc, 0, 0, 0, 0 | INTC2 0x00040000, INTC4 0x00044700 |
+| INTC6, INTC7 | 0x645b0000, 0x645c0000 | 0, 0x40 | INTC6 0x02d40018 |
+
+Each block: +0x08 IRQ_EN (reads the enabled mask, a 1 written sets that bit), +0x0c IRQ_DIS (a 1 written clears
+it); the clocks are `ap-intc0..7-eb` (AON gate 0x64900008 bits 11-18, `CLK_IGNORE_UNUSED`). TF-A did not write
+IRQ_EN again in 60 s of cluster-pd with a bit set by hand.
+
+`upstream/modules/ums9620_lpintc` (mainline, loaded by `extra-modules` after `mu300_thermal`) adds to IRQ_EN every SPI
+the kernel has enabled in the GIC distributor (`GICD_ISENABLER1..8`), at load and every 5 s from deferrable work
+(`period=`), which never wakes a CPU itself, so drivers that come later (Wi-Fi, the IPA delegate) are taken up. It only
+adds: TF-A's bits stay, and a line disabled again keeps its bit (the GIC still masks it). An enabled interrupt is
+handled anyway, so waking the cluster for it costs no extra work, only removes the wait. The bits it added are
+cleared again in its syscore suspend, so `mem` (FINDINGS 37) wakes on exactly what TF-A chose, and set again on resume;
+`rmmod` clears them the same way (checked: TF-A's values read back at the next load). The suspend and resume hooks
+have not run on a device yet: two `mem` attempts with pm_test=core were aborted before syscore by the Wi-Fi's
+WAKE# and by the IPA's and Wi-Fi's wakeup sources (traffic). EN and DIS are single writes, so nothing needs a lock with
+TF-A. Only the UMS9620 is accepted; a block whose clock is off is left alone.
+
+Measured from a Windows PC over the USB network (100 pings, 1 s apart; CPU0's cluster-pd allowed):
+
+| | average | median | 90 % | max |
+|---|---|---|---|---|
+| without the module | 15.7 ms | 8 ms | 47 ms | 69 ms |
+| with it | 9.5 ms | 7 ms | 20 ms | 42 ms |
+| CPU0 without cluster-pd (the workaround, 60 pings) | 10 ms | | | 70 ms |
+| every CPU at WFI only (this link's floor, 60 pings) | 7.1 ms | 5 ms | 14 ms | 40 ms |
+
+So with the module cluster-pd on CPU0 is as fast as the workaround and near what this computer's link gives at all;
+CPU0 still entered cluster-pd (3600 to 6600 entries over 60 pings). An earlier test with only INTC4 bit 14 set by hand gave
+85 pings of 85 at 1 ms or less (its link not recorded). With the module loaded the workaround can go: CPU0 keeps
+its cluster-pd.

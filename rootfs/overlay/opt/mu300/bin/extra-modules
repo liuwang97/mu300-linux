@@ -37,13 +37,17 @@ fi
 # hands frequency control over. The vendor 5.4 kernel has its own driver for it and no such module. modprobe needs
 # depmod's index (Ubuntu keeps the bundle's modules in extra/), so insmod by path is the fallback; a failure leaves
 # thermal-guard in charge, as before.
-if ! grep -q '^mu300_thermal ' /proc/modules; then
-    for f in "$M/mu300_thermal.ko" "$M/extra/mu300_thermal.ko"; do
+# ums9620_lpintc (upstream/modules/ums9620_lpintc, docs/FINDINGS.md 218), the same way: the interrupts the kernel
+# enabled become wake sources of the CPU clusters' power-down, which TF-A left at its own short list (USB, IPA and
+# the Wi-Fi's PCIe were not on it). Mainline only; without it an interrupt waits for something else to wake the cluster.
+for m in mu300_thermal ums9620_lpintc; do
+    grep -q "^$m " /proc/modules && continue
+    for f in "$M/$m.ko" "$M/extra/$m.ko"; do
         [ -f "$f" ] || continue
-        if modprobe mu300_thermal 2>/dev/null || insmod "$f" 2>/dev/null; then echo "loaded mu300_thermal"; else echo "FAILED mu300_thermal"; fi
+        if modprobe "$m" 2>/dev/null || insmod "$f" 2>/dev/null; then echo "loaded $m"; else echo "FAILED $m"; fi
         break
     done
-fi
+done
 
 for m in sprd_soc_thm thermal-generic-adc sprd_cpu_cooling leds-sc27xx-bltc zte_sar zte_card_holder_det sc27xx-vibra sprd_cp_dvfs sprd_ddr_dvfs sprd_gpu_cooling mali_kbase; do
     if modprobe "$m" 2>/tmp/mu300-modprobe.err; then

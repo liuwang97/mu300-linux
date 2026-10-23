@@ -2805,31 +2805,33 @@ class SipaDele(ShellTest):
                 self.assertNotIn('sipa-dele', calls.replace('sipa-dele-start', ''))
             ko.unlink()
 
-    def test_extra_modules_loads_the_stock_thermal_zone_module_when_the_kernel_has_one(self):
-        """mu300_thermal (the stock virtual thermal zone, mainline only): loaded once, by name where depmod indexed it
-        and by path where not (Ubuntu's extra/ before depmod ran); the vendor 5.4 kernel has no such module."""
-        for shell in self.each_shell():
-            r, calls = self.run_script(shell, 'extra-modules')                       # 5.4: no module, nothing tried
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertNotIn('mu300_thermal', calls)
-            for sub in ('', 'extra'):
-                ko = self.mods / sub / 'mu300_thermal.ko'
-                ko.parent.mkdir(exist_ok=True)
-                ko.write_text('')
-                r, calls = self.run_script(shell, 'extra-modules')
+    def test_extra_modules_loads_the_mainline_only_modules_when_the_kernel_has_them(self):
+        """mu300_thermal (the stock virtual thermal zone) and ums9620_lpintc (the cluster power-down's wake sources,
+        FINDINGS 218), mainline only: each loaded once, by name where depmod indexed it and by path where not
+        (Ubuntu's extra/ before depmod ran); the vendor 5.4 kernel has no such modules."""
+        for m in ('mu300_thermal', 'ums9620_lpintc'):
+            for shell in self.each_shell():
+                r, calls = self.run_script(shell, 'extra-modules')                   # 5.4: no module, nothing tried
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn('modprobe mu300_thermal', calls)
-                self.assertNotIn(f'insmod {ko}', calls)
-                self.assertIn('loaded mu300_thermal', r.stdout)
-                r, calls = self.run_script(shell, 'extra-modules', MODPROBE_RC=1)   # no index yet: by path
-                self.assertIn(f'insmod {ko}', calls)
-                self.assertIn('loaded mu300_thermal', r.stdout)
-                r, calls = self.run_script(shell, 'extra-modules', MODPROBE_RC=1, INSMOD_RC=1)
-                self.assertEqual(r.returncode, 0, r.stderr)                          # a failure is logged, not fatal
-                self.assertIn('FAILED mu300_thermal', r.stdout)
-                r, calls = self.run_script(shell, 'extra-modules', 'mu300_thermal 12288 0 - Live 0x0 (O)\n')
-                self.assertNotIn('mu300_thermal', calls)                             # loaded already
-                ko.unlink()
+                self.assertNotIn(m, calls)
+                for sub in ('', 'extra'):
+                    ko = self.mods / sub / f'{m}.ko'
+                    ko.parent.mkdir(exist_ok=True)
+                    ko.write_text('')
+                    r, calls = self.run_script(shell, 'extra-modules')
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertIn(f'modprobe {m}', calls)
+                    self.assertNotIn(f'insmod {ko}', calls)
+                    self.assertIn(f'loaded {m}', r.stdout)
+                    r, calls = self.run_script(shell, 'extra-modules', MODPROBE_RC=1)   # no index yet: by path
+                    self.assertIn(f'insmod {ko}', calls)
+                    self.assertIn(f'loaded {m}', r.stdout)
+                    r, calls = self.run_script(shell, 'extra-modules', MODPROBE_RC=1, INSMOD_RC=1)
+                    self.assertEqual(r.returncode, 0, r.stderr)                      # a failure is logged, not fatal
+                    self.assertIn(f'FAILED {m}', r.stdout)
+                    r, calls = self.run_script(shell, 'extra-modules', f'{m} 12288 0 - Live 0x0 (O)\n')
+                    self.assertNotIn(m, calls)                                       # loaded already
+                    ko.unlink()
 
     def test_refuses_after_the_wait(self):
         """K46: the packet domain never comes up: exit 1 after MU300_DELE_WAIT s, the module is not inserted."""

@@ -224,7 +224,9 @@ Fixes needed on top of the port:
 - Thermal: vendor `sprd_thermal_r5p0` (19 on-die zones) with calibration from the UMS9620 eFuse; the eFuse
   provider is built read-only.
 - cpufreq: vendor `sprd_sip_svc` + `sprd-cpufreq-v2`; ATF does the DVFS, the kernel asks through SIP SMC calls
-  (3 policies: 4 little / 3 mid / 1 big, schedutil). PSCI cpuidle (WFI, core sleep, cluster power-down).
+  (3 policies: 4 little / 3 mid / 1 big, schedutil). PSCI cpuidle (WFI, core sleep, cluster power-down);
+  `modules/ums9620_lpintc` makes the interrupts the kernel enabled wake sources of the cluster power-down, which TF-A
+  left at its own list without USB, IPA and PCIe (docs/FINDINGS.md 218).
   Idle temperature dropped from ~54 C to ~48 C.
 - The stock DT has trip points only on the vendor virtual zone (`soc-thmzone`: passive 70/85 C, critical 110 C,
   cooling maps to the three clusters), whose sensor driver mainline lacks: `modules/mu300_thermal` brings it back
