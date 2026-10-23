@@ -294,7 +294,7 @@ no_wakeup:
 #ifdef DW_PCIE_HAS_SKIP_LINK_WAIT
 	/*
 	 * MU300: the Marlin3 is off until wcn_bsp powers it and brings the link up through
-	 * sprd_pcie_configure_device(); the core's 0.9 s wait at probe never sees a link (patches/6.18/0028)
+	 * sprd_pcie_configure_device(); the core's 0.9 s wait at probe never sees a link (patches/6.18/0028, patches/7.2/0028)
 	 */
 	pp->skip_link_wait = true;
 #endif

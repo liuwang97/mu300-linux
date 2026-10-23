@@ -1,0 +1,40 @@
+PCI: dwc: a host whose endpoint is powered later may skip the link wait
+
+dw_pcie_host_init() waits for the link (10 x 90 ms) whatever the outcome, and ignores the result. On the
+UMS9620 the PCIe root port serves the Marlin3 (SC2355) Wi-Fi/BT chip, which is off until its own driver
+(wcn_bsp, loaded from userspace) powers it and brings the link up through sprd_pcie_configure_device(). At
+probe there is nothing to train with: "Phy link never came up" after 0.9 s, every boot, with the kernel's
+init thread waiting (pcie-sprd's own check after it cost another 0.9 s). A controller driver that knows sets
+skip_link_wait; the header defines DW_PCIE_HAS_SKIP_LINK_WAIT so that a driver shared with kernels without
+this patch can test for it. The 7.2 port: 7.2 stops host init when the wait times out, so the
+skip covers that check as well.
+
+--- a/drivers/pci/controller/dwc/pcie-designware.h
++++ b/drivers/pci/controller/dwc/pcie-designware.h
+@@ -471,6 +471,9 @@
+ 	bool			native_ecam;
+ 	bool                    skip_l23_ready;
+ 	bool			skip_pwrctrl_off;
++	/* the endpoint is powered later by its own driver: no link to wait for at probe */
++	bool			skip_link_wait;
++#define DW_PCIE_HAS_SKIP_LINK_WAIT
+ };
+ 
+ struct dw_pcie_ep_ops {
+--- a/drivers/pci/controller/dwc/pcie-designware-host.c
++++ b/drivers/pci/controller/dwc/pcie-designware-host.c
+@@ -662,9 +662,11 @@
+ 	 * Only fail on timeout error. Other errors indicate the device may
+ 	 * become available later, so continue without failing.
+ 	 */
+-	ret = dw_pcie_wait_for_link(pci);
+-	if (ret == -ETIMEDOUT)
+-		goto err_stop_link;
++	if (!pp->skip_link_wait) {
++		ret = dw_pcie_wait_for_link(pci);
++		if (ret == -ETIMEDOUT)
++			goto err_stop_link;
++	}
+ 
+ 	ret = pci_host_probe(bridge);
+ 	if (ret)
