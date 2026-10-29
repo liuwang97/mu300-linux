@@ -1,0 +1,178 @@
+name: Fork build (OpenWrt with the panel, kernel 7.3)
+
+# A build of this branch for one device, not a release: the mainline 7.3 kernel bundle (upstream/build.sh,
+# build-modules.sh, make-bundle.sh) and the openwrt-luci root filesystem (openwrt/build-rootfs.sh), laid out as the
+# directory of a release that "mu300-update apply --from DIR --unsigned" takes on the device, after
+# "echo 7.3 > /mnt/mu300-disk/boot/kernel" (the kernel choice). The 5.4 parts the images need (busybox, logdw,
+# e2fsck, the 5.4 modules) come from dikeckaan/mu300-linux's latest release, checked against its SHA256SUMS. Not
+# signed: the release key is the maintainer's. The tag is today's with N = 50, so that it is newer than the installed
+# release and takes no number the project's own releases of the day use.
+on:
+  push:
+    branches: [power-ddr-dfs-pd]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: shells and lz4
+        run: |
+          sudo apt-get install -y -qq dash busybox lz4 zip unzip cpio jq python3-tk xvfb >/dev/null
+          python3 -m pip install -q lz4 || python3 -m pip install -q --break-system-packages lz4
+      - name: tests (busybox sh, as on pull requests)
+        env:
+          MU300_TEST_SHELLS: busybox sh
+        run: |
+          cd tests
+          mods=$(python3 shard.py 4 ${{ matrix.shard }}); echo "shard ${{ matrix.shard }}: $mods"
+          python3 -m unittest $mods
+
+  # the new module and the built-in drivers against the two other series the releases ship, the fragment alone
+  compile:
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ['6.18', '7.2']
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Kernel version
+        id: kv
+        env:
+          SERIES: ${{ matrix.series }}
+        run: |
+          curl -fsSL https://www.kernel.org/releases.json | SERIES="$SERIES" python3 -c '
+          import json, os, re, sys
+          s = os.environ["SERIES"]
+          vs = [x["version"] for x in json.load(sys.stdin)["releases"] if re.fullmatch(r"[0-9]+\.[0-9]+(\.[0-9]+)?", x["version"])]
+          got = sorted((v for v in vs if v == s or v.startswith(s + ".")), key=lambda v: [int(p) for p in v.split(".")])
+          print("kv=" + got[-1])
+          ' | tee -a "$GITHUB_OUTPUT"
+      - name: Kernel and the SIPC modules
+        env:
+          KV: ${{ steps.kv.outputs.kv }}
+        run: |
+          docker build -t mu300-mainline-build upstream/
+          docker volume create mu300-mainline
+          docker run --rm -e KV="$KV" -e MU300_ALL_MODULES=0 -v mu300-mainline:/src -v "$PWD/upstream":/work \
+            mu300-mainline-build bash /work/build.sh
+          docker run --rm -e KV="$KV" -e MU300_ALL_MODULES=0 -v mu300-mainline:/src -v "$PWD/upstream":/work \
+            mu300-mainline-build bash /work/build-modules.sh sprd_modem sprd_ddr_dfs > /dev/null
+          ls -la upstream/out/modules/sprd_ddr_dfs.ko
+      - name: Build logs
+        if: failure()
+        run: tail -n 60 upstream/out/modules/*.log 2>/dev/null || true
+
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lz4 cpio zip unzip >/dev/null
+          sudo python3 -m pip install -q lz4 || sudo python3 -m pip install -q --break-system-packages lz4
+          sudo git config --system --add safe.directory "$GITHUB_WORKSPACE"
+          df -h / | tail -1
+      - name: Kernel version and tag
+        id: kv
+        run: |
+          curl -fsSL https://www.kernel.org/releases.json | python3 -c '
+          import json, re, sys
+          vs = [x["version"] for x in json.load(sys.stdin)["releases"] if re.fullmatch(r"[0-9]+\.[0-9]+(\.[0-9]+)?", x["version"])]
+          got = sorted((v for v in vs if v == "7.3" or v.startswith("7.3.")), key=lambda v: [int(p) for p in v.split(".")])
+          print("kv=" + got[-1])
+          ' | tee -a "$GITHUB_OUTPUT"
+          echo "treeup=$(git rev-parse HEAD:upstream)" >> "$GITHUB_OUTPUT"
+          echo "TAG=v$(date -u +%Y.%m.%d).50" >> "$GITHUB_ENV"
+          echo "D=$RUNNER_TEMP/release" >> "$GITHUB_ENV"
+          echo "IN=$RUNNER_TEMP/inputs" >> "$GITHUB_ENV"
+      - name: Mainline 7.3 outputs from the cache
+        id: c73
+        uses: actions/cache/restore@v4
+        with:
+          path: upstream/out-7.3
+          key: fork-kernel-${{ steps.kv.outputs.kv }}-${{ steps.kv.outputs.treeup }}
+      # the cache keeps the build logs' old times, and make-bundle.sh takes a source newer than its log for a module
+      # built before it changed; the key is the tree of upstream/, so the sources are the ones the cache was built from
+      - name: Cached logs are of this tree
+        if: steps.c73.outputs.cache-hit == 'true'
+        run: sudo touch upstream/out-7.3/modules/*.log
+      - name: Mainline 7.3
+        if: steps.c73.outputs.cache-hit != 'true'
+        env:
+          KV: ${{ steps.kv.outputs.kv }}
+        run: |
+          sudo -E docker build -t mu300-mainline-build upstream/
+          sudo -E docker volume create mu300-mainline
+          sudo -E docker run --rm -e KV="$KV" -e OUTDIR=out-7.3 -v mu300-mainline:/src -v "$PWD/upstream":/work mu300-mainline-build bash /work/build.sh
+          sudo -E docker run --rm -e KV="$KV" -e OUTDIR=out-7.3 -v mu300-mainline:/src -v "$PWD/upstream":/work mu300-mainline-build bash /work/build-modules.sh > /dev/null
+          ls upstream/out-7.3/modules/*.ko | wc -l
+      - if: steps.c73.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: upstream/out-7.3
+          key: fork-kernel-${{ steps.kv.outputs.kv }}-${{ steps.kv.outputs.treeup }}
+      - name: The latest release's 5.4 kernel bundle (busybox, logdw, e2fsck, the 5.4 modules)
+        run: |
+          mkdir -p ref
+          for f in mu300-kernel.tar.gz SHA256SUMS mu300-release; do
+            curl -fsSL -o "ref/$f" "https://github.com/dikeckaan/mu300-linux/releases/latest/download/$f"
+          done
+          echo "5.4 parts from $(cat ref/mu300-release)"
+          (cd ref && grep ' mu300-kernel.tar.gz$' SHA256SUMS | sha256sum -c -)
+      - name: Kernel bundle 7.3
+        run: |
+          mkdir -p "$D"
+          sudo -E env MU300_UPSTREAM_OUT="$PWD/upstream/out-7.3" sh upstream/make-bundle.sh "$D/mu300-kernel-7.3.tar.gz" ref/mu300-kernel.tar.gz
+          tar -tzf "$D/mu300-kernel-7.3.tar.gz" | grep -x './modules/sprd_ddr_dfs.ko'
+      - name: Inputs of the root filesystem
+        run: |
+          mkdir -p "$IN/out" "$IN/tools/logdw" "$IN/tools/bt-init" "$IN/tools/keys" "$IN/tools/carry" "$IN/tools/adbd"
+          K=$RUNNER_TEMP/k54 && mkdir -p "$K" && tar -xzf ref/mu300-kernel.tar.gz -C "$K"
+          cp -R "$K/modules" "$IN/out/modules"
+          cp "$K/modules.builtin" "$K/modules.builtin.modinfo" "$IN/out/"
+          cp "$K/busybox" "$IN/busybox" && cp "$K/logdw" "$IN/tools/logdw/logdw"
+          # as tools/make-release.sh builds them
+          sudo -E docker build -q -t mu300-kbuild kernel >/dev/null
+          sudo -E docker run --rm -v "$PWD/tools":/src:ro -v "$IN/tools":/o mu300-kbuild sh -c '
+            gcc -O2 -static -o /o/bt-init/mu300-bt-init /src/bt-init/mu300-bt-init.c &&
+            gcc -O2 -static -o /o/keys/mu300-keys /src/keys/mu300-keys.c &&
+            gcc -O2 -static -o /o/carry/mu300-carry /src/carry/mu300-carry.c'
+          sudo -E sh tools/adbd/build.sh "$IN/tools/adbd/adbd"
+      - name: OpenWrt with the MU300 control panel
+        run: |
+          sudo -E env MU300_SYSTEM=openwrt-luci MU300_INPUTS="$IN" MU300_VERSION="$TAG" sh openwrt/build-rootfs.sh mu300-openwrt-luci-release.tar.gz
+          sudo mv openwrt/mu300-openwrt-luci-release.tar.gz "$D/mu300-openwrt-luci-rootfs.tar.gz"
+      - name: Release directory
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$D"
+          python3 tools/image-manifest.py check "$D/mu300-openwrt-luci-rootfs.tar.gz"
+          tar -xzOf "$D/mu300-openwrt-luci-rootfs.tar.gz" ./etc/mu300/image-manifest.gz > "$D/mu300-openwrt-luci-rootfs.manifest.gz"
+          [ "$(tar -xzOf "$D/mu300-openwrt-luci-rootfs.tar.gz" ./etc/mu300/image-version)" = "$TAG" ]
+          cp rootfs/overlay/opt/mu300/bin/mu300-update "$D/mu300-update"
+          echo "$TAG" > "$D/mu300-release"
+          (cd "$D" && sha256sum *.tar.gz *.manifest.gz mu300-update mu300-release > SHA256SUMS)
+          ls -la "$D" && cat "$D/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mu300-${{ env.TAG }}-openwrt-luci-k7.3
+          path: ${{ env.D }}
+          compression-level: 0
+          retention-days: 14
+      - name: Build logs
+        if: failure()
+        run: tail -n 60 upstream/out-7.3/modules/*.log 2>/dev/null || true
