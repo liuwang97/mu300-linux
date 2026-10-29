@@ -98,7 +98,7 @@ what replaced it. The table below gives each section's state.
 | 33k | Vendor driver fixes from the U30 Air test, measured | current |
 | 34 | LEDs, and the defects from a second board's test | current |
 | 35 | kanoqwq's fixes, measured | current (panel languages: PR #48) |
-| 36 | Power profiles: idle radios, the charging boot, the charge guard | current; power table and device questions open (PR #62) |
+| 36 | Power profiles: idle radios, the charging boot, the charge guard | current; device questions open (PR #62); the power numbers are in 239 |
 | 37 | System suspend | current (fixes on branch `suspend-drivers`); power not measured |
 | 39 | The SMS pool: durable before the SIM lets go, long messages that never complete, forwarding | current |
 | 40 | The boot chain of the Linux slot: what is loaded per slot, and what the installers copy | current; not yet run on a device whose slots differ |
@@ -194,6 +194,7 @@ what replaced it. The table below gives each section's state.
 | 206 | Linux 7.3 as a fourth kernel: every patch applies unchanged (none upstream, none dropped); `PROC_SYSCTL` folded into `SYSCTL` (`config-ignored.txt`, checked only where the kernel lacks the symbol), the cfg80211 cookie handed in by value, `dma_capable()` with DMA attributes; the checksum list from www.kernel.org (the CDN lagged) | current (F50-B Ubuntu: all checks, the boot fallback; the one hang in a reboot loop was the board's plug pulled by accident, not 7.3; the U30 Air openwrt-luci with the VPN and its kill switch, 2026-10-19; `sprd_wlan_combo` for 6.18.57 and 7.2.11 byte for byte v2026.10.19.3's; released in v2026.10.22.1, F50-B 10/10 boots on 7.3 in a reboot soak) |
 | 213 | A kernel oops on a restart of mu300-adbd: f_ncm and f_rndis free `os_desc_table` at unbind and keep the pointer, and a bind without MS OS descriptors (adbd's `without_adb` wrote `os_desc/use` 0) leaves it for the next unbind to free again - a kmalloc-16 double free that came back as `kstrdup()` oopsing in the UDC store; patch 0027 clears the pointer (6.18.57, 7.2.11 and 7.3 all have the bug), mu300-adbd keeps the descriptors on for every kernel | current (F50 Ubuntu, 2026-10-24: unpatched 7.3 with the release's mu300-adbd went down within 11 restarts of it once, and oopsed at restart 118 a second time - "Unable to handle kernel paging request" at an address made of string bytes; 6.18.58 with 0027 and the same mu300-adbd 200 restarts clean; unpatched 7.3 with the new mu300-adbd 150 restarts clean. A U30 Air on OpenWrt 6.18.58 dropped off the air during the same loop) |
 | 218 | CPU0's cluster power-down: USB, IPA and the Wi-Fi's PCIe were not wake sources of LP_AP_INTC (TF-A's IRQ_EN table); `ums9620_lpintc` adds every SPI the kernel enabled | current (U30 Air OpenWrt 6.18.57: USB pings 9.5 ms avg / 42 ms max instead of 15.7 / 69; F50 Ubuntu 6.18.58: 1.2 / 1.5 ms instead of 30.6 / 150; builds for 7.2.12; suspend path not run) |
+| 239 | The U30 Air on battery with the cable in (charger HIZ), no client: 5 GHz hotspot 145-155 mA (~0.65 W), hotspot down 45-57 mA; the idle hotspot 90-100 mA; for small traffic NR SA connected about 380 mA against LTE 240; EasyTier +220-230 mA (the bearer never idles); NTP after boot ~50 mA; DDR DFS, cpu0 cluster-pd, cpu4-7 off 4-9 mA each | measured (v2026.10.29.50, 7.3.0, 2026-10-29); nothing changed yet; phone, NSA, heavy hour not measured |
 
 ## Hardware and firmware facts
 
@@ -3110,6 +3111,8 @@ discharging; the draw is the mean of the run's mA (and W) after the first 30 s. 
 | all off | idle: hotspot, modem and LEDs off, the floor | pending | pending |
 | eco | `CPU=eco` on the baseline | pending | pending |
 | Android idle | the stock firmware at rest (the target) | pending | pending |
+
+**Update 2026-10-29:** measured on battery with the cable in, in 239 (charger HIZ, `tools/power/`).
 
 What the defaults rest on: not on these numbers (there are none yet) but on the design. Radios are what drains a
 hotspot with nobody connected, so `battery` and `saver` switch them off after a few minutes; `plugged` keeps
@@ -12450,3 +12453,103 @@ is not known (the counters were read only at the end).
 
 Not covered: the other rebinders (`mu300-usb-reset`, `mu300-usb` mode changes, the U30 Air's role switch) do not take
 the lock; they run on request or 25 s after boot, not in the window above.
+
+### 239. The U30 Air's power on battery with the cable in: the hotspot, the 5G bearer's RRC tail and EasyTier
+
+**Status: measured on one U30 Air (OpenWrt; v2026.10.19.3 with 7.2.11, then v2026.10.29.50 with 7.3.0 and DDR DFS,
+FINDINGS 238), 2026-10-29, 26 runs of 120-300 s at 4.14-4.19 V, with the scripts in `tools/power/`. Nothing in the
+system is changed by this section: the numbers are the ones §36's table waited for, and the end of the section is
+the plan. Not measured: a phone on the hotspot, the throughput hour, the LEDs, stock Android, NSA (below).**
+
+The target behind it: 20 hours on the U30 Air's cell (4050 mAh in the device tree, 4500 mAh on the label) with one
+phone on the hotspot - about 9 hours idle with the phone's screen off, 10 hours of small traffic and 1 hour of heavy
+traffic. With 95 % of the cell usable and 3 Wh for the heavy hour, the other 19 hours may draw 0.60 W (4050 mAh) to
+0.68 W (4500 mAh) on average, about 145-165 mA at the cell.
+
+**Method.** The charger is the SGM41513 at I2C 6-0x1a (§33, #102). `REG00` bit 7 (EN_HIZ) opens its input while
+VBUS stays, so the cell carries the whole system and the fuel gauge's `current_now` is the system's draw; the
+charger's watchdog is off on this board (`REG05` 0x87), so the bit stays until cleared. Limiting the charge or input
+current instead (100 mA) leaves VBUS feeding an unknown share. The USB gadget is soft-disconnected for each run
+(`/sys/class/udc/*/soft_connect`; it came back `configured` after 0-2 s every time): a computer on the gadget was
+using the device as its uplink, and the first try with it connected read 481 mA (2.0 W), most of it the computer's
+traffic over 5G. `pm-run.sh` samples `current_now`/`voltage_now` every 2 s and reads the PMIC's coulomb counter
+(0x868/0x86c through `/sys/kernel/debug/regmap/spi4.0/registers`, a seek to the two lines; a whole dump costs 2 s of
+system time) at both ends; the two agree within 15 mA (0.742 mA per count/s). Two traps on the way: a failsafe that
+clears HIZ after the run, left running, cleared it in the middle of the next run (the first batch's runs 2-4 and 8
+are discarded); and once in 26 runs something else cleared HIZ after 86 s (`kc_sa` is cut there). `pm-run.sh` now
+kills its failsafe and sets the bit again at every sample. mu300-power is stopped during a batch, or its self-check
+undoes the scenarios.
+
+**Read percentiles, not means.** With no traffic at all the 5G modem still goes RRC-connected for 10-30 s at a time
+(+150-250 mA), at random within a 2-minute run: two identical runs (`base`, `base2`, 7.3) read 1212 and 930 mW. The
+current's p10 is the floor with the modem idle.
+
+| run (v2026.10.29.50 / 7.3.0, no client, EasyTier off unless named) | mean mA | mW | p10/p50/p90 mA |
+|---|---|---|---|
+| hotspot 5 GHz VHT80, NR SA idle, sysntpd stopped (`base`, `base2` of the 4th batch) | 159 / 152 | 666 / 636 | 144/156/178, 141/145/166 |
+| the same on 2.4 GHz HT20 ch 6 (`g24`) | 145 | 607 | 126/147/163 |
+| hotspot down (`woff`) / with DDR pinned at 1866 MHz (`woffperf`) | 57 / 56 | 237 / 234 | 45/54/66, 42/55/69 |
+| modem RF off (`AT+CFUN=4`), hotspot up (`radiooff`) | 150 | 625 | 136/142/160 |
+| LTE only, idle (`idle_lte`) | 140 | 586 | 135/138/148 |
+| a ping every 30 s: NR SA (`ka_sa`, `ka_sa2`) / LTE (`ka_lte`) | 234 / 237 / 226 | 974 / 986 / 941 | 145/177/383, 144/166/379, 142/237/317 |
+| a ping every 5 s (connected all the time): **NR SA** (`kc_sa`) / **LTE** (`kc_lte`) | **380** / **239** | 1572 / 992 | 364/382/391, 183/225/325 |
+| EasyTier as configured (`etrun`) / with `lazy_p2p` (`etlazy`) | 385 / 379 | 1594 / 1571 | 367/379/416, 365/371/392 |
+| sysntpd running, 40 min after boot (`diag`, 240 s) | 192 | 801 | 142/151/365 |
+| DDR auto / performance / powersave, hotspot up (`base2`, `ddrperf`, `ddrsave` of the 3rd batch) | 224 / 253 / 229 | 931 / 1052 / 952 | 145/171/385, 153/178/394, 148/199/361 |
+| cpu0's cluster-pd allowed (`cpd`) / cpu4-7 offline (`bigoff`) / RT uclamp default 0 (`cpurt`) | 205 / 205 / 259 | 851 / 853 / 1077 | 141/154/370, 139/147/364, 144/253/368 |
+| before: v2026.10.19.3 / 7.2.11, mu300-power running, EasyTier up, a phone associated and idle (`b0`, 300 s) | 321 | 1338 | 260/326/379 |
+
+Where the current goes, on 7.3 with no client:
+
+* **The AP side is small now.** The floor with the hotspot down is 45-48 mA (about 200 mW): CPUs, DDR (auto idles
+  at 533 MHz), PMIC, the idle modem. DDR DFS saves 8-9 mA at the floor with the hotspot up and nothing measurable
+  with it down; cpu0's cluster-pd 4 mA (the device-local `/etc/rc.local` from 2026-10-23 still disables it; FINDINGS
+  218's module makes that workaround unnecessary); cpu4-7 offline 6 mA. `sched_util_clamp_min_rt_default` (1024)
+  lets every SCHED_FIFO wakeup - the sbuf/sblock/sipa threads, the threaded IRQs of the PMIC, I2C, dwc3 and mmc - ask
+  for the top frequency (policy4 sat at 2.3 GHz when idle; 1.16-1.54 GHz with 0), but at idle the draw did not
+  change; with traffic it was not measured.
+* **The hotspot costs 90-100 mA (about 400 mW) with nobody on it** (`radiooff` p10 136 against the floor; `base`
+  against `woff`). 2.4 GHz HT20 is 10-14 mA less; VHT20 was no better than VHT80. The link is already in L1: the
+  Marlin3 offers L1.1/L1.2 (its L1SS capability 0x0028371f), but the root port's L1SS capability (at 0x160, register
+  0x164) reads 0, so the kernel enables `L0s L1` only; neither our device tree nor the stock one (vendor_boot) has
+  `sprd,pcie-aspml1p2-syscons`, and wcn_bsp's `sprd_pcie_set_aspm_policy()` is compiled out. `sprd_pcie_fix_header()`
+  writes T_POWER_ON at DBI 0x154, which on this root port is the Secondary PCIe capability's lane equalization
+  control, not L1SS. The driver has no `set_tx_power`, and Kbuild's `-DCONFIG_SPRD_WLAN_DEBUG` makes it tell the
+  firmware the host is userdebug (`NOTIFY_AP_VERSION_USER_DEBUG`); what the firmware does with that is not known.
+* **An NR SA bearer that is connected costs about 235 mA whatever it carries.** 84-byte pings every 5 s kept it at
+  380 mA flat (floor 145); LTE under the same pings read 183-325 mA, settling near 195: about 140 mA (580 mW) less.
+  For sparse traffic the two are alike: a ping every 30 s cost about 0.7 mAh per burst on both, on SA as 10-12 s near
+  380 mA, on LTE as about 20 s near 240-320 mA. LTE idle is 12-19 mA under NR SA idle. A switch took 4-8 s to
+  register and about a minute until the bearer passed traffic again (SIM2, `tolte`/`tosa`, four times).
+* **A small packet is a 10-12 s burst on NR SA.** With nothing else on the bearer, `pm-rrc-diag.sh` put every burst
+  right after one of the device's own packets, and in 240 s those were only NTP: busybox ntpd polls the four pool
+  servers about every 35 s in the first hour after boot, about 50 mA (200 mW) on average. An hour after boot, 30
+  minutes held one NTP packet.
+* **EasyTier keeps the bearer connected all the time: +220-230 mA (about 0.9 W).** As configured (two peers over
+  TCP and UDP, p2p on) it sent 1 MB in 2 minutes, most of it symmetric-NAT hole punching - 52-byte UDP packets to a
+  dozen random ports of one peer, 15-20 a second (4.9 MB in 30 minutes on 7.2). `lazy_p2p` cut that to 45 KB but not
+  the draw: its keepalives come faster than the network's inactivity timer, and that is all it takes.
+* The 7.2 baseline with all of that (EasyTier, NTP, mu300-power, a phone associated and idle) was 321 mA.
+
+What this means for 20 hours, from the measured parts: the hotspot floor alone is 145-155 mA, so the idle hours are
+within reach only with almost no bearer bursts, and the small-traffic hours, with the bearer connected most of the
+time, cost about 380 mA on NR SA against about 240 mA on LTE: 10 such hours are about 1.4 Ah apart. The plan, the
+largest first:
+
+1. **Nothing always-on over the bearer.** EasyTier (not part of this tree; its package also failed to reinstall on
+   v2026.10.29.50, so it does not start at the moment) or any VPN or keepalive faster than about 10 s costs 0.9 W
+   flat; on battery it should be off or started on demand.
+2. **On battery, LTE (or NSA) instead of NR SA.** mu300-power's `RADIO_IDLE=lte` writes `AT+SPENDC=2`, which does
+   nothing on an SA registration (this one: CMCC, NR SA, AcT 11), and it applies only when nobody is on the hotspot.
+   Needed: a work-mode switch per profile (SIM1 and SIM2, the user's lock kept), with the stack restart above. NSA
+   (131 with `AT+SP5GRAN=0`) should give LTE's small-traffic draw and still add NR for the heavy hour; a batch for it
+   ran (`tonsa`, `kc_nsa`, `idle_nsa`, `ka_nsa`, `tosa`) but the device was unplugged before its data were read. That
+   batch ends by writing back `134,134` and `SP5GRAN` 1; `AT+SPTESTMODE?` should read `134,134,...` again.
+3. **The hotspot:** a firmware run without the userdebug notice (Kbuild); 2.4 GHz for the light hours (10-14 mA;
+   it caps the heavy hour's throughput); the hotspot off soon after the last client leaves (it is two thirds of the
+   idle draw).
+4. **Small items:** one or two NTP servers instead of four, or the modem's network time (`AT+CCLK`, which matched the
+   system clock); the cpu0 workaround out of `/etc/rc.local`; cpu4-7 offline in eco; DDR DFS (238).
+
+Next measurements: a phone on the hotspot (screen off, then light use), the NSA batch again, the heavy hour, and the
+LEDs.
