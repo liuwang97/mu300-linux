@@ -1,4 +1,4 @@
-name: Device build of this branch (kernel 6.18 bundle, OpenWrt root filesystem)
+name: Device build of this branch (kernel 7.2 bundle, OpenWrt root filesystem)
 
 # A build of kano's branch for one U30 Air, not a release: the mainline kernel with its modules as a kernel bundle
 # (upstream/build.sh, build-modules.sh, make-bundle.sh), the four patched OpenWrt packages the image installs
@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 env:
-  KV: 6.18.54
+  KV: 7.2.8
+  KSERIES: "7.2"
   REF_RELEASE: v2026.10.08
 
 jobs:
@@ -62,7 +63,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p kout
-          sudo sh upstream/make-bundle.sh "$PWD/kout/mu300-kernel-6.18.tar.gz" "$PWD/ref/mu300-kernel.tar.gz"
+          sudo sh upstream/make-bundle.sh "$PWD/kout/mu300-kernel-$KSERIES.tar.gz" "$PWD/ref/mu300-kernel.tar.gz"
           sudo cp -a upstream/out kout/out
           sudo rm -f kout/out/modules/*.log
           sudo chown -R "$(id -u):$(id -g)" kout
@@ -203,7 +204,7 @@ jobs:
       - name: Release directory
         run: |
           sudo chown -R "$(id -u):$(id -g)" "$D"
-          cp kout/mu300-kernel-6.18.tar.gz "$D/"
+          cp "kout/mu300-kernel-$KSERIES.tar.gz" "$D/"
           cp rootfs/overlay/opt/mu300/bin/mu300-update desktop/local-update.sh "$D/"
           [ "$(tar -xzOf "$D/mu300-openwrt-rootfs.tar.gz" ./etc/mu300/image-version)" = "$VERSION" ]
           tar -tzf "$D/mu300-openwrt-rootfs.tar.gz" | grep -c .
