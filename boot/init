@@ -498,7 +498,9 @@ case $(cat /etc/mu300-desktop-root-mode 2>/dev/null) in
 esac
 # Generic images retain the bounded internal-root fallback.
 sd_root=
-if [ "$root_target" != part ]; then
+# Not for a system on the eMMC hidden area (desktop root mode "legacy"): with no TF card the eight rounds below
+# are 7.5 s of every boot (U30 Air, 2026-11-27: persist-target at 1.0 s, sd-scan at 8.5 s).
+if [ "$root_target" != part ] && [ "$(cat /etc/mu300-desktop-root-mode 2>/dev/null)" != legacy ]; then
 for n in $(seq 1 8); do
     seen=
     for d in /dev/mmcblk[1-9]p1 /dev/mmcblk[1-9]; do
@@ -555,8 +557,10 @@ mkdir -p /newroot
 # The ext4 area holds one or more systems: /ubuntu, /openwrt (selected by /.mu300/boot-os), or a single
 # Ubuntu directly in its root (first installs). Pick one and remember how to start it.
 if [ "$root_mounted" = 0 ] && [ "$internal_root" = 1 ] && root_region_valid "$ROOT_OFFSET"; then
+    # by offset alone: the BusyBox of this ramdisk (Ubuntu 1.36.1) has no "losetup -S", and with it the root was
+    # never attached ("rootfs-unavailable losetup: invalid option -- 'S'", U30 Air, 2026-11-27)
     rootloop=$(losetup -f 2>/run/rootmount.err)
-    if [ -n "$rootloop" ] && losetup -o "$ROOT_OFFSET" -S "$root_bytes" "$rootloop" /dev/mmcblk0 2>>/run/rootmount.err \
+    if [ -n "$rootloop" ] && losetup -o "$ROOT_OFFSET" "$rootloop" /dev/mmcblk0 2>>/run/rootmount.err \
        && [ "$(cat /sys/block/${rootloop#/dev/}/loop/offset)" = "$ROOT_OFFSET" ] \
        && mount -t ext4 -o noatime "$rootloop" /disk 2>>/run/rootmount.err; then
         root_mounted=1
