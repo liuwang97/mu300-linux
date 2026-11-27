@@ -1,0 +1,218 @@
+name: Device build of this branch (kernel 6.18 bundle, OpenWrt root filesystem)
+
+# A build of kano's branch for one U30 Air, not a release: the mainline kernel with its modules as a kernel bundle
+# (upstream/build.sh, build-modules.sh, make-bundle.sh), the four patched OpenWrt packages the image installs
+# (block-mount, hostapd, libiwinfo, lpac: openwrt/build-*.sh) and the root filesystem (openwrt/build-rootfs.sh).
+# The parts that are not built here are the static busybox and the 5.4 modules the image's 5.4 directory holds:
+# they come from dikeckaan/mu300-linux v2026.10.08 (the release of the day this branch forked), checked against its
+# SHA256SUMS. Nothing proprietary goes in or comes out: the device's own firmware stays on the device.
+on:
+  push:
+    branches: [kano-tip-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  KV: 6.18.54
+  REF_RELEASE: v2026.10.08
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - name: Key
+        id: key
+        run: echo "tree=$(git rev-parse HEAD:upstream)-$(git rev-parse HEAD:boot)-$(git rev-parse HEAD:android-vendor)" >> "$GITHUB_OUTPUT"
+      - name: Kernel outputs from the cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: kout
+          key: kano-kernel-${{ env.KV }}-${{ steps.key.outputs.tree }}
+      - name: Tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lz4 cpio >/dev/null
+          df -h / | tail -1
+      - name: Kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo docker build -q -t mu300-mainline-build upstream/
+          sudo docker volume create mu300-mainline
+          sudo docker run --rm -e KV="$KV" -v mu300-mainline:/src -v "$PWD/upstream":/work mu300-mainline-build bash /work/build.sh
+      - name: Modules
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo docker run --rm -e KV="$KV" -v mu300-mainline:/src -v "$PWD/upstream":/work mu300-mainline-build bash /work/build-modules.sh > /dev/null
+          ls upstream/out/modules/*.ko | wc -l
+      - name: The reference release's 5.4 bundle (busybox, logdw)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ref
+          for f in mu300-kernel.tar.gz SHA256SUMS; do
+            curl -fsSL -o "ref/$f" "https://github.com/dikeckaan/mu300-linux/releases/download/$REF_RELEASE/$f"
+          done
+          (cd ref && grep ' mu300-kernel.tar.gz$' SHA256SUMS | sha256sum -c -)
+      - name: Kernel bundle
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p kout
+          sudo sh upstream/make-bundle.sh "$PWD/kout/mu300-kernel-6.18.tar.gz" "$PWD/ref/mu300-kernel.tar.gz"
+          sudo cp -a upstream/out kout/out
+          sudo rm -f kout/out/modules/*.log
+          sudo chown -R "$(id -u):$(id -g)" kout
+          strings kout/out/Image | sed -n 's/^Linux version \([^ ]*\) .*/kernel \1/p' | head -1
+          ls -la kout kout/out | head -40
+      - name: Build logs
+        if: failure()
+        run: sudo sh -c 'tail -n 80 upstream/out/modules/*.log 2>/dev/null' || true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: kout
+          key: kano-kernel-${{ env.KV }}-${{ steps.key.outputs.tree }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel
+          path: kout
+          compression-level: 0
+          retention-days: 14
+
+  packages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v5
+      - name: Key
+        id: key
+        run: echo "tree=$(git rev-parse HEAD:openwrt)" >> "$GITHUB_OUTPUT"
+      - name: Packages from the cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: pkgs
+          key: kano-packages-${{ steps.key.outputs.tree }}
+      - name: Room on the runner
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+      - name: block-mount
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p pkgs
+          sudo sh openwrt/build-block-mount.sh "$PWD/pkgs/block-mount-mu300.apk" > block.log 2>&1 || { tail -n 80 block.log; exit 1; }
+          tail -n 3 block.log
+      - name: hostapd, hostapd-common, wifi-scripts
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo env UNISOC_WRT_VER=25.12.5 UNISOC_JOBS="$(nproc)" sh openwrt/build-hostapd.sh "$PWD/pkgs/wifi-sae" > hostapd.log 2>&1 || { tail -n 120 hostapd.log; exit 1; }
+          tail -n 3 hostapd.log
+      - name: libiwinfo
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo env UNISOC_JOBS="$(nproc)" sh openwrt/build-iwinfo-ap-scan.sh "$PWD/pkgs/iwinfo-ap-scan" > iwinfo.log 2>&1 || { tail -n 120 iwinfo.log; exit 1; }
+          tail -n 3 iwinfo.log
+      - name: lpac
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo env UNISOC_WRT_VER=25.12.5 UNISOC_JOBS="$(nproc)" sh openwrt/build-lpac.sh "$PWD/pkgs/lpac" > lpac.log 2>&1 || { tail -n 120 lpac.log; exit 1; }
+          tail -n 3 lpac.log
+      - name: What was built
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" pkgs
+          find pkgs -type f | sort | xargs ls -la
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: pkgs
+          key: kano-packages-${{ steps.key.outputs.tree }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: pkgs
+          include-hidden-files: true
+          retention-days: 14
+
+  rootfs:
+    needs: [kernel, packages]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel
+          path: kout
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: pkgs
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lz4 cpio zip unzip gcc g++ binutils >/dev/null
+          # the helper builds ask for the compiler by its cross name; on this runner it is the native one
+          for t in gcc g++ strip; do
+            command -v aarch64-linux-gnu-$t >/dev/null || sudo ln -s "$(command -v $t)" /usr/local/bin/aarch64-linux-gnu-$t
+          done
+          aarch64-linux-gnu-gcc --version | head -1
+          sudo git config --system --add safe.directory "$GITHUB_WORKSPACE"
+          echo "IN=$RUNNER_TEMP/inputs" >> "$GITHUB_ENV"
+          echo "BT=$RUNNER_TEMP/bluetooth-decoder" >> "$GITHUB_ENV"
+          echo "D=$RUNNER_TEMP/release" >> "$GITHUB_ENV"
+      - name: The reference release's 5.4 bundle (busybox, logdw, the 5.4 modules)
+        run: |
+          mkdir -p ref
+          for f in mu300-kernel.tar.gz SHA256SUMS; do
+            curl -fsSL -o "ref/$f" "https://github.com/dikeckaan/mu300-linux/releases/download/$REF_RELEASE/$f"
+          done
+          (cd ref && grep ' mu300-kernel.tar.gz$' SHA256SUMS | sha256sum -c -)
+      - name: Inputs of the root filesystem
+        run: |
+          mkdir -p "$IN/out" "$IN/tools/logdw" "$D" work
+          K=$RUNNER_TEMP/k54 && mkdir -p "$K" && tar -xzf ref/mu300-kernel.tar.gz -C "$K"
+          cp -R "$K/modules" "$IN/out/modules"
+          cp "$K/modules.builtin" "$K/modules.builtin.modinfo" "$IN/out/"
+          cp "$K/busybox" "$IN/busybox" && cp "$K/logdw" "$IN/tools/logdw/logdw"
+          sh tools/bt-init/build.sh "$IN/tools/bt-init"
+          sh tools/keys/build.sh "$IN/tools/keys"
+          sh tools/atd-io/build.sh "$IN/tools/atd-io"
+          file "$IN"/tools/*/mu300-* "$IN/busybox"
+          # the kernel outputs and the four packages where build-rootfs.sh looks for them (it checks each against its
+          # sources and takes it as built)
+          rm -rf upstream/out && cp -a kout/out upstream/out
+          cp pkgs/block-mount-mu300.apk pkgs/block-mount-mu300.apk.build-id pkgs/block-mount-mu300.apk.sha256 work/
+          cp -a pkgs/wifi-sae pkgs/iwinfo-ap-scan work/
+          python3 tools/ble-decoder/build.py --output "$BT"
+          python3 tools/release-identity.py --profile mu300 --kernel "$KV" --output "$D/release.json"
+          echo "VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_version"])' "$D/release.json")" >> "$GITHUB_ENV"
+      - name: OpenWrt root filesystem
+        run: |
+          sudo -E env MU300_GPU=0 MU300_INPUTS="$IN" MU300_MAINLINE_OUT="$PWD/upstream/out" MU300_VERSION="$VERSION" \
+            MU300_RELEASE_JSON="$D/release.json" UNISOC_BLUETOOTH_DECODER="$BT" UNISOC_LPAC_APKS="$PWD/pkgs/lpac" \
+            sh openwrt/build-rootfs.sh mu300-openwrt-rootfs.tar.gz
+          sudo mv openwrt/mu300-openwrt-rootfs.tar.gz "$D/mu300-openwrt-rootfs.tar.gz"
+      - name: Release directory
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$D"
+          cp kout/mu300-kernel-6.18.tar.gz "$D/"
+          cp rootfs/overlay/opt/mu300/bin/mu300-update desktop/local-update.sh "$D/"
+          [ "$(tar -xzOf "$D/mu300-openwrt-rootfs.tar.gz" ./etc/mu300/image-version)" = "$VERSION" ]
+          tar -tzf "$D/mu300-openwrt-rootfs.tar.gz" | grep -c .
+          tar -tzf "$D/mu300-openwrt-rootfs.tar.gz" | grep -x './lib/preinit/31_unisoc_fast_boot'
+          tar -tzf "$D/mu300-openwrt-rootfs.tar.gz" | grep -x "./lib/modules/$KV/sprd_wlan_combo.ko"
+          (cd "$D" && sha256sum * > SHA256SUMS && cat SHA256SUMS && cat release.json)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kano-device-build
+          path: ${{ env.D }}
+          compression-level: 0
+          retention-days: 14
